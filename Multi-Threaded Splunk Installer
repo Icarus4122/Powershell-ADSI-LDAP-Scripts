@@ -1,0 +1,95 @@
+function Install-Splunk {
+    [CmdletBinding()]
+    [Alias()]
+    param (
+    [Parameter(Mandatory=$false,
+    Position=0,
+    ValueFromPipeline=$True,
+    ValueFromPipelineByPropertyName=$True,
+    HelpMessage='One or more computer names')]
+    [Alias("ComputerName")]
+    # Parameter naming is Name so as to accept pipeline input from the Active Directory PowerShell module
+    [string[]]$Name,
+
+    [Parameter(Mandatory=$false,
+    Position=1,
+    HelpMessage='Credentials to use')]
+    [ValidateNotNull()]
+    [System.Management.Automation.PSCredential]
+    [System.Management.Automation.Credential()]
+    $Credential = [System.Management.Automation.PSCredential]::Empty)
+    function Read-OpenFileDialog([string]$WindowTitle, [string]$InitialDirectory) {
+            Add-Type -AssemblyName System.Windows.Forms
+            $openFileDialog = New-Object System.Windows.Forms.OpenFileDialog
+            $openFileDialog.Title = $WindowTitle
+            if (![string]::IsNullOrWhiteSpace($InitialDirectory)) { $openFileDialog.InitialDirectory = $InitialDirectory }
+            $openFileDialog.Filter = $Filter
+            if ($AllowMultiSelect) { $openFileDialog.MultiSelect = $true }
+            $openFileDialog.ShowHelp = $true
+            $openFileDialog.ShowDialog() > $null
+            if ($AllowMultiSelect) { return $openFileDialog.Filenames } else { return $openFileDialog.Filename }
+        }
+    function Read-OpenFileDialog1([string]$WindowTitle1, [string]$InitialDirectory1) {
+            Add-Type -AssemblyName System.Windows.Forms
+            $openFileDialog = New-Object System.Windows.Forms.OpenFileDialog
+            $openFileDialog.Title = $WindowTitle1
+            if (![string]::IsNullOrWhiteSpace($InitialDirectory1)) { $openFileDialog.InitialDirectory = $InitialDirectory1 }
+            $openFileDialog.Filter = $Filter1
+            if ($AllowMultiSelect) { $openFileDialog.MultiSelect = $true }
+            $openFileDialog.ShowHelp = $true
+            $openFileDialog.ShowDialog() > $null
+            if ($AllowMultiSelect) { return $openFileDialog.Filenames } else { return $openFileDialog.Filename }
+        }
+    $Global:TargetURI = Read-Host -Prompt "Please Enter the IP or Domain for Splunk"
+    Powershell -Command "Write-Host '[deployment-client]'`n 'phoneHomeIntervalInSecs=60'`n 'connect_timeout=60'`n 'send_timeout=60'`n 'rev_timeout=60'`n '[target-broker:deploymentServer]'`n 'targetUri=' + '$TargetURI' + ':8089'" | Out-file -FilePath deploymentclient.conf
+    $Global:FilePath = Read-OpenFileDialog -WindowTitle "Select the Splunk .exe to copy" -InitialDirectory 'C:\'
+    $Global:ComputerList = Read-OpenFileDialog1 -WindowTitle1 "Please Select the ComputerList" -InitialDirectory1 "C:\"
+    $Global:Pso = New-PSSessionOption -OpenTimeout 500
+    $Global:Config = (Get-ChildItem deploymentclient.conf).FullName
+    $Computers = Get-Content "$Global:ComputerList"
+    $MaxThreads = 30
+    $MaxWaitatEnd = 600
+    $SleepTimer = 500
+    $i = 0
+
+    Write-Output "Cleaning jobs"
+    Get-Job | Remove-Job -Force
+    Write-Output "Jobs Cleaned"
+    Write-output "Cleaning PSSesions"
+    Get-PSSession | Remove-PSSession
+    Write-Output "PSSessions Cleaned"
+
+    foreach($Computer in $Computers){
+    While($(Get-Job -State Running).count -ge $MaxThreads){
+    Write-Progress -Activity "Installing Splunk to Computers" -Status "Waiting for Threads to Close" -CurrentOperation "$i threads created - $($(Get-Job -state running).count) threads open" -PercentComplete ($i / $Computers.count * 100)
+    Start-Sleep -Milliseconds $SleepTimer
+    }
+        $i++
+        $Sessions = New-PSSession -ComputerName $Computer -Credential $Credential -ErrorAction 0 -SessionOption $Global:Pso
+        foreach($Session in Get-PSSession){
+        Invoke-Command -Session $Session  -ScriptBlock {New-Item "$env:SystemDrive\ProgramData\Splunk" -ItemType Directory -ErrorAction 0 | Out-Null}
+        Copy-Item -Path $Global:Config -Destination "$env:SystemDrive\ProgramData\Splunk\deploymentclient.conf" -Force -ErrorAction 0 -ToSession $Session
+        Copy-Item -Path $Global:FilePath -Destination "$env:SystemDrive\ProgramData\Splunk\Splunk.msi" -Force -ErrorAction 0 -ToSession $Session
+        Invoke-command -Session $Session -ScriptBlock {Set-Location $env:SystemDrive\ProgramData\Splunk} -AsJob -JobName "Switching Path"
+        Wait-Job -Name "Switching Path"
+        Invoke-command -Session $Session -ScriptBlock {& cmd.exe /c 'msiexec.exe /i Splunk.msi' /qn AGREETOLICENSE=Yes DEPLOYMENT_SERVER="200.200.200.51:8089" LAUNCHSPLUNK=1 } -AsJob -JobName "Splunk MSI installation"
+<#        Wait-job -Name 'Splunk MSI installation'
+        $SplunkService = Invoke-Command -Session $Session -ScriptBlock {Get-Service -Name "SplunkForwarder"}
+            if ($SplunkService -ne 'Running'){
+                Invoke-Command -Session $Session -ScriptBlock {Start-Service "SplunkForwarder"} -AsJob -JobName "Starting Splunk"
+                Wait-Job -Name "Starting Splunk"
+#>                
+            }
+        }
+        
+        $Complete = Get-Date
+        While ($(Get-job -state Running).count -gt 0){
+        $ComputersStillRunning = ""
+        ForEach ($System in $(Get-Job -State running)){$ComputersStillRunning += ", $($System.name)"}
+            $ComputersStillRunning = $ComputersStillRunning.Substring(2)
+            Write-Progress -Activity "Installing Splunk to Computers" -Status "Waiting for Threads to Close" -CurrentOperation "$i threads created - $($(Get-Job -state running).count) threads open" -PercentComplete ($i / $Computers.count * 100)
+            if ($(New-TimeSpan $Complete $(Get-Date)).TotalSeconds -ge $MaxWaitatEnd){"Killing all jobs still running . . .";Get-Job -State Running | Remove-Job -Force}
+            Start-Sleep -Milliseconds $SleepTimer
+        }
+    }
+
