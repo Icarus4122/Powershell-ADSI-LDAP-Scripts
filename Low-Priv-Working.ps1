@@ -81,7 +81,7 @@ function Show-AllUsers {
             elseif ($group -match "CN=Remote Desktop Users") { $groupTags += "RDP" }
         }
 
-        $tagSummary = ($groupTags + @(if ($adminFlag) { "adminCount=1" })).Trim() -join ", "
+        $tagSummary = ($groupTags + @(if ($adminFlag) { "adminCount=1" })) -join ", "
 
         # Highlight based on privilege
         if ($groupTags -contains "DA" -or $groupTags -contains "EA") {
