@@ -19,16 +19,29 @@ foreach ($tool in $tools) {
 }
 
 # AccessChk (Users on C:)
-if (Test-Path ".\accesschk.exe") {
-    Write-Host "`n[>] accesschk -uwcqv 'Users' C:\" -ForegroundColor Cyan
-    .\accesschk.exe -uwcqv "Users" C:\ 2>&1 | ForEach-Object {
-        if ($_ -match "WRITE|ALL_ACCESS") {
-            Write-Host "[!] $_" -ForegroundColor Red
-        } elseif ($_ -match "READ") {
-            Write-Host "[!] $_" -ForegroundColor Yellow
+if (Test-Path ".\accesschk.exe") {    
+    Write-Host "`n[+] AccessChk - User Privilege and Object Access Review" -ForegroundColor Cyan
+    try {
+        $username = $env:USERNAME
+        $domain = $env:USERDOMAIN
+        $fullIdentity = "$domain\$username"
+    
+        if (Test-Path ".\\accesschk.exe") {
+            Write-Host "[>] Running: accesschk.exe -uwcqv $fullIdentity *" -ForegroundColor Yellow
+            .\\accesschk.exe -uwcqv $fullIdentity * | ForEach-Object {
+                if ($_ -match ".*(Write|Full|Modify).*") {
+                    Write-Host $_ -ForegroundColor Red
+                } elseif ($_ -match "Read|Query") {
+                    Write-Host $_ -ForegroundColor Yellow
+                } else {
+                    Write-Host $_ -ForegroundColor DarkGray
+                }
+            }
         } else {
-            Write-Host $_ -ForegroundColor Gray
+            Write-Host "[x] accesschk.exe not found in current directory." -ForegroundColor Red
         }
+    } catch {
+        Write-Host "[x] Error running accesschk." -ForegroundColor Red
     }
 }
 
@@ -47,6 +60,63 @@ if (Test-Path ".\psloggedon.exe") {
         Write-Host "[!] PsLoggedOn execution failed." -ForegroundColor Red
     }
 }
+
+# -----------------------------
+# Section A1: Domain Info Summary (ADSI-based)
+# -----------------------------
+Write-Host "`n[+] Domain Information Summary" -ForegroundColor Cyan
+
+try {
+    $domain = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
+    $forest = $domain.Forest
+    $dc = $domain.PdcRoleOwner
+
+    [PSCustomObject]@{
+        DomainName        = $domain.Name
+        NetBIOSName       = $domain.NetBiosName
+        ForestName        = $forest.Name
+        DomainMode        = $domain.DomainMode
+        ForestMode        = $forest.ForestMode
+        DomainControllers = ($domain.DomainControllers | ForEach-Object { $_.Name }) -join ", "
+        PDC               = $dc.Name
+    } | Format-List
+}
+catch {
+    Write-Host "[x] Failed to retrieve domain info." -ForegroundColor Red
+}
+
+# -----------------------------
+# Section A2: Domain Computers + IP Resolution (via ADSI)
+# -----------------------------
+Write-Host "`n[+] Domain Computers (via ADSI with IP Lookup)" -ForegroundColor Cyan
+
+try {
+    $searcher = New-Object DirectoryServices.DirectorySearcher
+    $searcher.Filter = "(objectClass=computer)"
+    $searcher.PageSize = 1000
+    $computers = $searcher.FindAll()
+
+    foreach ($comp in $computers) {
+        $name = $comp.Properties.name
+        if ($name) {
+            try {
+                $resolved = [System.Net.Dns]::GetHostAddresses($name) | Where-Object { $_.AddressFamily -eq 'InterNetwork' }
+                if ($resolved) {
+                    foreach ($ip in $resolved) {
+                        Write-Host "[+] $name => $($ip.IPAddressToString)" -ForegroundColor Green
+                    }
+                } else {
+                    Write-Host "[!] $name => No IP resolved" -ForegroundColor Yellow
+                }
+            } catch {
+                Write-Host "[!] $name => DNS lookup failed" -ForegroundColor Red
+            }
+        }
+    }
+} catch {
+    Write-Host "[x] Failed to enumerate domain computers" -ForegroundColor Red
+}
+
 
 # -----------------------------
 # Section X1: MRU File Tracking
@@ -200,31 +270,71 @@ function Expand-GroupTree {
         [int]$Level = 0,
         [ref]$VisitedGroups
     )
+
     if ($VisitedGroups.Value -contains $GroupDN) { return }
     $VisitedGroups.Value += $GroupDN
+
     try {
-        $group = [ADSI]"LDAP://$GroupDN"
+        $group = [ADSI]("LDAP://$GroupDN")
         $indent = ('  ' * $Level)
-        Write-Host "$indent→ [$($group.name)]" -ForegroundColor Green
+
+        if ($Level -eq 0) {
+            Write-Host "[+] Group: $($group.name)" -ForegroundColor Cyan
+        } else {
+            Write-Host "$indent└─ [+] Group: $($group.name)" -ForegroundColor Green
+        }
+
+        $nestedGroups = @()
+        $userMembers = @()
+
         if ($group.member) {
             foreach ($memberDN in $group.member) {
                 try {
                     $entry = [ADSI]("LDAP://$memberDN")
-                    $type = $entry.objectClass[-1]
-                    if ($type -eq "user") {
-                        $admin = if ($entry.admincount -eq 1) { " (Admin)" } else { "" }
-                        Write-Host "$indent   └─ $($entry.samaccountname) $admin" -ForegroundColor (if ($entry.admincount -eq 1) {"Red"} else {"Gray"})
-                    } elseif ($type -eq "group") {
-                        Expand-GroupTree -GroupDN $memberDN -Level ($Level + 1) -VisitedGroups $VisitedGroups
+                    $type = $entry.objectClass | Select-Object -Last 1
+                    if ($type -eq "group") {
+                        $nestedGroups += $memberDN
                     }
-                } catch {}
+                    elseif ($type -eq "user") {
+                        $userMembers += $entry
+                    }
+                } catch { continue }
             }
+
+            # Recurse first into nested groups
+            foreach ($nested in $nestedGroups) {
+                Expand-GroupTree -GroupDN $nested -Level ($Level + 1) -VisitedGroups $VisitedGroups
+            }
+
+            # Only show users if this is a leaf group
+            if ($nestedGroups.Count -eq 0 -and $userMembers.Count -gt 0) {
+                Write-Host "$indent   └─ [+] Users:" -ForegroundColor Cyan
+                foreach ($user in $userMembers) {
+                    $userIndent = ('  ' * ($Level + 2))
+                    $sam = $user.samaccountname
+                    $disp = $user.displayname
+                    $cn = $user.cn
+                    $admin = if ($user.admincount) { $user.admincount } else { 0 }
+                    Write-Host "$userIndent└─ $sam (CN: $cn | DisplayName: $disp | AdminCount: $admin)" -ForegroundColor Gray
+                }
+            }
+        } else {
+            Write-Host "$indent   └─ (no members)" -ForegroundColor DarkGray
         }
-    } catch {}
+    } catch {
+        Write-Host "Error processing group: $GroupDN" -ForegroundColor Red
+    }
 }
-$visited = New-Object System.Collections.Generic.List[string]
+# === Entry Point ===
+$searcher = New-Object DirectoryServices.DirectorySearcher
+$searcher.Filter = "(objectClass=group)"
+$searcher.PageSize = 1000
+$groups = $searcher.FindAll()
+
 foreach ($group in $groups) {
-    Expand-GroupTree -GroupDN $group.Properties.distinguishedname[0] -Level 0 -VisitedGroups ([ref]$visited)
+    $groupDN = $group.Properties.distinguishedname[0]
+    $visited = New-Object System.Collections.Generic.List[string]
+    Expand-GroupTree -GroupDN $groupDN -Level 0 -VisitedGroups ([ref]$visited)
 }
 
 # -----------------------------
