@@ -18,25 +18,99 @@ try {
 }
 Write-Host "[*] DN:  $DN"  -ForegroundColor Cyan
 
+function Resolve-NestedGroupMembers {
+    param (
+        [string]$GroupDN,
+        [string]$Prefix = "",
+        [string]$Branch = "+--"
+    )
+
+    try {
+        $searcher = New-Object DirectoryServices.DirectorySearcher
+        $searcher.Filter = "(distinguishedName=$GroupDN)"
+        $searcher.PropertiesToLoad.Add("member") > $null
+        $group = $searcher.FindOne()
+
+        if ($group -and $group.Properties.member) {
+            $members = $group.Properties.member | Sort-Object
+            $count = $members.Count
+
+            for ($i = 0; $i -lt $count; $i++) {
+                $member = $members[$i]
+                $isLast = ($i -eq ($count - 1))
+
+                # Replace ternary with if/else
+                $branchSymbol = "+--"
+                if ($isLast) {
+                    $nextPrefix = "$Prefix    "
+                } else {
+                    $nextPrefix = "$Prefix|   "
+                }
+
+                $objSearcher = New-Object DirectoryServices.DirectorySearcher
+                $objSearcher.Filter = "(distinguishedName=$member)"
+                $objSearcher.PropertiesToLoad.AddRange(@("objectClass", "cn"))
+                $objResult = $objSearcher.FindOne()
+
+                if ($objResult) {
+                    $classes = $objResult.Properties["objectclass"]
+                    $cn = $objResult.Properties["cn"][0]
+
+                    if ($classes -contains "group") {
+                        Write-Host "$Prefix$branchSymbol Group : $cn" -ForegroundColor Cyan
+                        Resolve-NestedGroupMembers -GroupDN $member -Prefix $nextPrefix
+                    }
+                    else {
+                        Write-Host "$Prefix$branchSymbol User  : $cn" -ForegroundColor Gray
+                    }
+                }
+            }
+        }
+        else {
+            Write-Host "$Prefix$Branch [!] No members found." -ForegroundColor DarkGray
+        }
+    }
+    catch {
+        Write-Host "[!] Error resolving nested members: $_" -ForegroundColor Red
+    }
+}
+
 function Show-AllComputers {
-    Write-Host "`n[+] Enumerating all domain machines (with OS + build info)..." -ForegroundColor Yellow
+    Write-Host "`n[+] Enumerating all domain machines (with OS + IP + build info)..." -ForegroundColor Yellow
+
+    # Retrieve computers via LDAP
     $computers = Invoke-LDAPSearch "(objectCategory=computer)"
 
     foreach ($computer in $computers) {
         $props = $computer.Properties
-        $hostname  = $props.name
-        $os        = $props.operatingsystem
-        $osver     = $props.operatingsystemversion
+        $hostname  = $props.dnshostname[0]
+        $os        = $props.operatingsystem[0]
+        $osver     = $props.operatingsystemversion[0]
         $lastlogon = if ($props.lastlogon) { Convert-FileTime $props.lastlogon[0] } else { "N/A" }
 
+        # Resolve IP address from hostname
+        try {
+            $ip = [System.Net.Dns]::GetHostAddresses($hostname) |
+                  Where-Object { $_.AddressFamily -eq 'InterNetwork' } |
+                  Select-Object -First 1
+            if ($ip) {
+                $ipOut = $ip.IPAddressToString
+            } else {
+                $ipOut = "Unresolved"
+            }
+        } catch {
+            $ipOut = "Resolution Failed"
+        }
+
+        # Display the result
         Write-Host "Computer: $hostname" -ForegroundColor Green
         Write-Host "    OS: $os"
         Write-Host "    OS Version: $osver" -ForegroundColor Cyan
         Write-Host "    Last Logon: $lastlogon"
+        Write-Host "    IP Address: $ipOut" -ForegroundColor Yellow
         Write-Host "---------------------------------------------"
     }
 }
-
 
 # Create Directory Entry and Searcher
 $entry = New-Object System.DirectoryServices.DirectoryEntry($LDAP)
@@ -112,22 +186,14 @@ function Show-AllUsers {
     }
 }
 
-# Function: Show all Domain Groups
 function Show-AllGroups {
-    Write-Host "`n[+] Enumerating all domain groups..." -ForegroundColor Yellow
+    Write-Host "`n[+] Enumerating all domain groups (with nested memberships)..." -ForegroundColor Yellow
     $results = Invoke-LDAPSearch "(objectCategory=group)"
     foreach ($group in $results) {
-        $cn = $group.Properties.cn
-        $members = $group.Properties.member
-        Write-Host "Group: $cn" -ForegroundColor Magenta
-        if ($members) {
-            foreach ($m in $members) {
-                Write-Host "  Member: $m" -ForegroundColor Gray
-            }
-        } else {
-            Write-Host "  No members found." -ForegroundColor DarkGray
-        }
-        Write-Host "---------------------------------------------"
+        $cn = $group.Properties.cn[0]
+        $dn = $group.Properties.distinguishedname[0]
+        Write-Host "`n[+] Group : $cn" -ForegroundColor Magenta
+        Resolve-NestedGroupMembers -GroupDN $dn -Prefix "   "
     }
 }
 
