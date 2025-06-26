@@ -33,6 +33,7 @@ function Find-KerberoastableUsers {
         }
     }
 Write-Host "`n[>] NEXT: Use 'Rubeus kerberoast' or 'GetUserSPNs.py' to request TGS tickets and extract hashes for cracking." -ForegroundColor DarkGray
+Write-Host "`n[>] IF Rubeus kerberoast' make sure on you trim it when you move it to machine.. cat hash.txt | tr -d '[:space:]'" -ForegroundColor Cyan
 }
 
 function Check-SilverTicketTargets {
